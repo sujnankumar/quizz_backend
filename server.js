@@ -285,15 +285,25 @@ io.on('connection', (socket) => {
       player.score += totalPoints;
     }
 
+    // Send submission notification but don't update scores yet
+    const playerName = player.name;
+    io.to(roomCode).emit('playerSubmitted', { playerId: player.id, playerName });
+
     // Check if all players answered
     const allAnswered = room.players.every(p => p.answered);
     if (allAnswered) {
       io.to(roomCode).emit('allAnswered', room);
       clearQuestionTimer(roomCode);
+    } else {
+      // Only send room update (without scores) until all answer or timer ends
+      const roomUpdate = { ...room };
+      // Remove score information from update
+      roomUpdate.players = roomUpdate.players.map(p => ({
+        ...p,
+        score: 0 // Hide real scores until reveal
+      }));
+      io.to(roomCode).emit('roomUpdated', roomUpdate);
     }
-
-    // Update room for all players
-    io.to(roomCode).emit('roomUpdated', room);
   });
 
   // Next question
