@@ -13,11 +13,17 @@ const io = new SocketIOServer(server, {
   cors: {
     origin: process.env.NODE_ENV === 'production'
       ? ["https://quizz-coral-five.vercel.app"]
-      : ["http://localhost:3000", "http://localhost:3001"],
+      : ["http://localhost:3000", "http://localhost:3001","http://192.168.13.69:3000"],
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ['polling', 'websocket']
+  transports: ['polling', 'websocket'],
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  maxHttpBufferSize: 1e6,
+  perMessageDeflate: {
+    threshold: 1024
+  }
 });
 
 const PORT = process.env.PORT || 3001;
@@ -25,8 +31,36 @@ const PORT = process.env.PORT || 3001;
 // Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// In-memory storage for rooms (in production, use Redis or database)
+ // In-memory storage for rooms (in production, use Redis or database)
 const rooms = new Map();
+
+// Track which room a socket belongs to for O(1) disconnect cleanup
+const socketRoomMap = new Map();
+
+// Basic connection rate limiting per IP to prevent storms
+const connectionTracker = new Map(); // ip -> { count, resetAt }
+
+// Apply simple rate limit: max 20 connections per minute per IP
+io.use((socket, next) => {
+  try {
+    const xfwd = socket.handshake.headers['x-forwarded-for'];
+    const ip = Array.isArray(xfwd) ? xfwd[0] : (xfwd ? xfwd.split(',')[0].trim() : socket.handshake.address || 'unknown');
+    const now = Date.now();
+    const entry = connectionTracker.get(ip) || { count: 0, resetAt: now + 60_000 };
+    if (now > entry.resetAt) {
+      entry.count = 0;
+      entry.resetAt = now + 60_000;
+    }
+    entry.count += 1;
+    connectionTracker.set(ip, entry);
+    if (entry.count > 20) {
+      return next(new Error('Rate limit exceeded'));
+    }
+    return next();
+  } catch {
+    return next();
+  }
+});
 
 // Question generation function using Gemini
 async function generateQuestions(topic, difficulty, count) {
@@ -146,6 +180,7 @@ io.on('connection', (socket) => {
 
       rooms.set(roomCode, room);
       socket.join(roomCode);
+      socketRoomMap.set(socket.id, roomCode);
 
       socket.emit('roomCreated', { room, playerId });
       console.log(`Room created: ${roomCode} by ${playerName}`);
@@ -186,6 +221,7 @@ io.on('connection', (socket) => {
 
     room.players.push(player);
     socket.join(roomCode);
+    socketRoomMap.set(socket.id, roomCode);
 
     // Update all players in room
     io.to(roomCode).emit('roomUpdated', room);
@@ -288,24 +324,41 @@ io.on('connection', (socket) => {
 
   // Disconnect handling
   socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+    const roomCode = socketRoomMap.get(socket.id);
+    if (roomCode) {
+      const room = rooms.get(roomCode);
+      socketRoomMap.delete(socket.id);
+      if (room) {
+        const idx = room.players.findIndex(p => p.id === socket.id);
+        if (idx !== -1) {
+          room.players.splice(idx, 1);
+          if (room.players.length === 0) {
+            rooms.delete(roomCode);
+            clearQuestionTimer(roomCode);
+          } else {
+            if (room.adminId === socket.id) {
+              room.adminId = room.players[0].id;
+            }
+            io.to(roomCode).emit('roomUpdated', room);
+          }
+        }
+      }
+      return;
+    }
 
-    // Find and remove player from rooms
-    for (const [roomCode, room] of rooms) {
-      const playerIndex = room.players.findIndex(p => p.id === socket.id);
-      if (playerIndex !== -1) {
-        room.players.splice(playerIndex, 1);
-
+    // Fallback: scan rooms (should be rare)
+    for (const [rc, room] of rooms) {
+      const idx = room.players.findIndex(p => p.id === socket.id);
+      if (idx !== -1) {
+        room.players.splice(idx, 1);
         if (room.players.length === 0) {
-          // Delete empty room
-          rooms.delete(roomCode);
-          clearQuestionTimer(roomCode);
+          rooms.delete(rc);
+          clearQuestionTimer(rc);
         } else {
-          // Update room and appoint new admin if needed
           if (room.adminId === socket.id) {
             room.adminId = room.players[0].id;
           }
-          io.to(roomCode).emit('roomUpdated', room);
+          io.to(rc).emit('roomUpdated', room);
         }
         break;
       }
