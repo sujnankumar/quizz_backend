@@ -357,9 +357,11 @@ app.get('/', (req, res) => {
 export default app;
 
 // Start server (only when run directly, not in Vercel)
-if (require.main === module) {
+if (!process.env.LAMBDA_TASK_ROOT && !process.env.VERCEL && process.argv[1].endsWith('server.js')) {
   server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`Gemini API Key: ${process.env.GEMINI_API_KEY ? 'Set' : 'Not set'}`);
   });
 
   // Cleanup timers on server shutdown
