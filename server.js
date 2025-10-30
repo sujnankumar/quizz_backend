@@ -18,13 +18,15 @@ const io = new SocketIOServer(server, {
     credentials: true
   },
   path: '/socket.io',
-  transports: ['polling', 'websocket'],
+  allowUpgrades: false,
+  transports: ['polling'],
   pingInterval: 25000,
   pingTimeout: 60000,
   maxHttpBufferSize: 1e6,
   perMessageDeflate: {
     threshold: 1024
-  }
+  },
+  cookie: false
 });
 
 const PORT = process.env.PORT || 3001;
@@ -409,13 +411,39 @@ const corsOptions = {
   methods: ['GET', 'POST', 'OPTIONS'],
 };
 
+// CORS
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json());
 
+// IMPORTANT: do not run express.json() on Engine.IO (Socket.IO) endpoints,
+// it breaks polling POST bodies and causes 400 Bad Request.
+app.use((req, res, next) => {
+  // Skip JSON parsing for socket transport endpoints
+  if (req.url.startsWith('/socket.io/')) {
+    return next();
+  }
+  // Apply JSON parser for our normal API routes
+  return express.json()(req, res, next);
+});
+
+// Health check
 // Health check
 app.get('/', (req, res) => {
   res.json({ status: 'Quiz Game Backend Running', rooms: rooms.size });
+});
+
+// Debug endpoint to verify CORS headers and origin behavior in production
+app.get('/api/health/cors', (req, res) => {
+  const origin = req.headers.origin || null;
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    origin,
+    allowlist: (process.env.NODE_ENV === 'production'
+      ? ['https://quizz-coral-five.vercel.app']
+      : ['http://localhost:3000', 'http://localhost:3001','http://192.168.13.69:3000']),
+    corsApplied: true
+  });
 });
 
 // Export for Vercel serverless functions

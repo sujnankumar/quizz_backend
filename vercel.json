@@ -6,6 +6,14 @@
       "use": "@vercel/node"
     }
   ],
+  "functions": {
+    "server.js": {
+      "runtime": "nodejs18.x",
+      "websocket": true,
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
   "routes": [
     {
       "src": "/socket.io/(.*)",
