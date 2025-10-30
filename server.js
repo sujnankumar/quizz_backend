@@ -18,8 +18,8 @@ const io = new SocketIOServer(server, {
     credentials: true
   },
   path: '/socket.io',
-  allowUpgrades: false,
-  transports: ['polling'],
+  allowUpgrades: true,
+  transports: ['websocket', 'polling'],
   pingInterval: 25000,
   pingTimeout: 60000,
   maxHttpBufferSize: 1e6,
@@ -446,38 +446,8 @@ app.get('/api/health/cors', (req, res) => {
   });
 });
 
-// Export for Vercel serverless functions
-// Delegate requests to the same http server so Socket.IO sees /socket.io
-export default function handler(req, res) {
-  const origin = req.headers.origin;
-  const allowlist = process.env.NODE_ENV === 'production'
-    ? ['https://quizz-coral-five.vercel.app']
-    : ['http://localhost:3000', 'http://localhost:3001','http://192.168.13.69:3000'];
-
-  // CORS preflight for polling
-  if (req.method === 'OPTIONS') {
-    if (origin && allowlist.includes(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    }
-    res.statusCode = 204;
-    res.end();
-    return;
-  }
-
-  // Ensure CORS headers on actual requests when using credentials
-  if (origin && allowlist.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  }
-
-  // Hand off to our http server (Express + Socket.IO)
-  server.emit('request', req, res);
-}
+// Export app (for tests or other runtimes)
+export default app;
 
 // Start server (only when run directly, not in Vercel)
 if (!process.env.LAMBDA_TASK_ROOT && !process.env.VERCEL && process.argv[1].endsWith('server.js')) {
