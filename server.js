@@ -17,6 +17,7 @@ const io = new SocketIOServer(server, {
     methods: ["GET", "POST"],
     credentials: true
   },
+  path: '/socket.io',
   transports: ['polling', 'websocket'],
   pingInterval: 25000,
   pingTimeout: 60000,
@@ -398,7 +399,18 @@ function clearQuestionTimer(roomCode) {
 }
 
 // Middleware
-app.use(cors());
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? ['https://quizz-coral-five.vercel.app']
+  : ['http://localhost:3000', 'http://localhost:3001'];
+
+const corsOptions = {
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 
 // Health check
@@ -407,7 +419,37 @@ app.get('/', (req, res) => {
 });
 
 // Export for Vercel serverless functions
-export default app;
+// Delegate requests to the same http server so Socket.IO sees /socket.io
+export default function handler(req, res) {
+  const origin = req.headers.origin;
+  const allowlist = process.env.NODE_ENV === 'production'
+    ? ['https://quizz-coral-five.vercel.app']
+    : ['http://localhost:3000', 'http://localhost:3001','http://192.168.13.69:3000'];
+
+  // CORS preflight for polling
+  if (req.method === 'OPTIONS') {
+    if (origin && allowlist.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    }
+    res.statusCode = 204;
+    res.end();
+    return;
+  }
+
+  // Ensure CORS headers on actual requests when using credentials
+  if (origin && allowlist.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+
+  // Hand off to our http server (Express + Socket.IO)
+  server.emit('request', req, res);
+}
 
 // Start server (only when run directly, not in Vercel)
 if (!process.env.LAMBDA_TASK_ROOT && !process.env.VERCEL && process.argv[1].endsWith('server.js')) {
