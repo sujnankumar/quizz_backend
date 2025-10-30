@@ -34,7 +34,7 @@ const PORT = process.env.PORT || 3001;
 // Initialize Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
- // In-memory storage for rooms (in production, use Redis or database)
+  // In-memory storage for rooms (in production, use Redis or database)
 const rooms = new Map();
 
 // Track which room a socket belongs to for O(1) disconnect cleanup
@@ -134,36 +134,12 @@ async function generateQuestions(topic, difficulty, count) {
 
   } catch (error) {
     console.error('Error generating questions from AI:', error);
-    // Remove fallback to dummy questions - let the error propagate
-    throw new Error(`Failed to generate questions: ${error.message}`);
-  }
-}
-
-
-// Socket.IO connection handling
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
-
-  // Create room
-  socket.on('createRoom', async (data) => {
-    try {
-      const { playerName, topic, difficulty, questionCount } = data;
-
-      // Generate unique room code
-      let roomCode;
-      do {
-        roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-      } while (rooms.has(roomCode));
-
-      const playerId = socket.id;
-      const player = {
-        id: playerId,
-        name: playerName,
-        score: 0,
-        answered: false,
-        selectedAnswer: null,
-        answerTime: null
+    Reovfllbkdok yqe.log('-leh p,o egto ode
+    hww Err`Fi oignslayerName: $: aslAsssage}`
+        answerTime: null,
+        roundPoints: 0
       };
+
 
       const room = {
         id: roomCode,
@@ -177,6 +153,8 @@ io.on('connection', (socket) => {
         topic,
         difficulty,
         questionCount,
+        questionTime: 30, // default seconds, adjustable in lobby
+        questionsReady: false, // require pre-generation before start
         questionTimer: null,
         createdAt: new Date()
       };
@@ -185,7 +163,7 @@ io.on('connection', (socket) => {
       socket.join(roomCode);
       socketRoomMap.set(socket.id, roomCode);
 
-      socket.emit('roomCreated', { room, playerId });
+      socket.emit('roomCreated', { room, playerId, clientId: stableClientId });
       console.log(`Room created: ${roomCode} by ${playerName}`);
     } catch (error) {
       socket.emit('error', { message: 'Failed to create room' });
@@ -194,7 +172,7 @@ io.on('connection', (socket) => {
 
   // Join room
   socket.on('joinRoom', (data) => {
-    const { roomCode, playerName } = data;
+    const { roomCode, playerName, clientId } = data;
 
     const room = rooms.get(roomCode.toUpperCase());
     if (!room) {
@@ -203,6 +181,18 @@ io.on('connection', (socket) => {
     }
 
     if (room.status !== 'waiting') {
+      // Allow rejoin if clientId matches an existing player
+      if (clientId) {
+        const existing = room.players.find(p => p.clientId === clientId);
+        if (existing) {
+          existing.id = socket.id;
+          socket.join(roomCode);
+          socketRoomMap.set(socket.id, roomCode);
+          io.to(roomCode).emit('roomUpdated', room);
+          socket.emit('roomJoined', { room, playerId: existing.id });
+          return;
+        }
+      }
       socket.emit('error', { message: 'Game has already started' });
       return;
     }
@@ -215,11 +205,13 @@ io.on('connection', (socket) => {
     const playerId = socket.id;
     const player = {
       id: playerId,
+      clientId: clientId || `${socket.id}-${Date.now()}`,
       name: playerName,
       score: 0,
       answered: false,
       selectedAnswer: null,
-      answerTime: null
+      answerTime: null,
+      roundPoints: 0
     };
 
     room.players.push(player);
@@ -233,7 +225,57 @@ io.on('connection', (socket) => {
     console.log(`${playerName} joined room ${roomCode}`);
   });
 
-  // Start quiz
+  // Rejoin room (for refresh/reconnect)
+  socket.on('rejoinRoom', (data) => {
+    try {
+      const { roomCode, clientId, playerName } = data;
+      if (!roomCode || !clientId) {
+        socket.emit('error', { message: 'Invalid rejoin payload' });
+        return;
+      }
+      const room = rooms.get(roomCode.toUpperCase());
+      if (!room) {
+        socket.emit('error', { message: 'Room not found' });
+        return;
+      }
+      const existing = room.players.find(p => p.clientId === clientId);
+      if (!existing) {
+        // If room is waiting, allow joining as new; otherwise reject
+        if (room.status !== 'waiting') {
+          socket.emit('error', { message: 'Game already in progress' });
+          return;
+        }
+        // Join fresh
+        const playerId = socket.id;
+        const player = {
+          id: playerId,
+          clientId,
+          name: playerName || 'Player',
+          score: 0,
+          answered: false,
+          selectedAnswer: null,
+          answerTime: null,
+          roundPoints: 0
+        };
+        room.players.push(player);
+        socket.join(roomCode.toUpperCase());
+        socketRoomMap.set(socket.id, roomCode.toUpperCase());
+        io.to(roomCode.toUpperCase()).emit('roomUpdated', room);
+        socket.emit('roomJoined', { room, playerId });
+        return;
+      }
+      // Rebind socket id
+      existing.id = socket.id;
+      socket.join(roomCode.toUpperCase());
+      socketRoomMap.set(socket.id, roomCode.toUpperCase());
+      io.to(roomCode.toUpperCase()).emit('roomUpdated', room);
+      socket.emit('roomJoined', { room, playerId: existing.id });
+    } catch (e) {
+      socket.emit('error', { message: 'Failed to rejoin' });
+    }
+  });
+
+  // Start quiz (requires pre-generated questions)
   socket.on('startQuiz', async () => {
     const roomCode = Array.from(socket.rooms)[1]; // Get room socket is in
     const room = rooms.get(roomCode);
@@ -243,10 +285,12 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (!Array.isArray(room.questions) || room.questions.length === 0 || !room.questionsReady) {
+      socket.emit('error', { message: 'Generate questions first' });
+      return;
+    }
+
     try {
-      // Generate questions
-      const questions = await generateQuestions(room.topic, room.difficulty, room.questionCount);
-      room.questions = questions;
       room.status = 'quiz';
       room.currentQuestion = 0;
 
@@ -255,55 +299,11 @@ io.on('connection', (socket) => {
       console.log(`Quiz started in room ${roomCode}`);
 
       // Start first question timer
-      startQuestionTimer(roomCode, room);
-    } catch (error) {
-      socket.emit('error', { message: 'Failed to start quiz' });
-      console.error('Failed to start quiz:', error);
-    }
-  });
+      startQuestionTimer(roomCode, room);}
+     ode).emit('allAnswered', room);
+  
 
-  // Player selects answer
-  socket.on('selectAnswer', (data) => {
-    const { answer, timeRemaining } = data;
-    const roomCode = Array.from(socket.rooms)[1];
-    const room = rooms.get(roomCode);
-
-    if (!room || room.status !== 'quiz') return;
-
-    const player = room.players.find(p => p.id === socket.id);
-    if (!player || player.answered) return;
-
-    const timeBonus = Math.floor(timeRemaining / 30 * 10); // Bonus based on remaining time
-    const basePoints = 10;
-    const totalPoints = basePoints + timeBonus;
-
-    player.selectedAnswer = answer;
-    player.answerTime = 30 - timeRemaining;
-    player.answered = true;
-
-    if (answer === room.questions[room.currentQuestion].correctAnswer) {
-      player.score += totalPoints;
-    }
-
-    // Send submission notification but don't update scores yet
-    const playerName = player.name;
-    io.to(roomCode).emit('playerSubmitted', { playerId: player.id, playerName });
-
-    // Check if all players answered
-    const allAnswered = room.players.every(p => p.answered);
-    if (allAnswered) {
-      io.to(roomCode).emit('allAnswered', room);
-      clearQuestionTimer(roomCode);
-    } else {
-      // Only send room update (without scores) until all answer or timer ends
-      const roomUpdate = { ...room };
-      // Remove score information from update
-      roomUpdate.players = roomUpdate.players.map(p => ({
-        ...p,
-        score: 0 // Hide real scores until reveal
-      }));
-      io.to(roomCode).emit('roomUpdated', roomUpdate);
-    }
+  io.to(roomCode).emit('roomUpdated', room);
   });
 
   // Next question
@@ -320,6 +320,7 @@ io.on('connection', (socket) => {
       player.answered = false;
       player.selectedAnswer = null;
       player.answerTime = null;
+      player.roundPoints = 0;
     });
 
     room.currentQuestion++;
@@ -397,7 +398,7 @@ function startQuestionTimer(roomCode, room) {
     });
 
     io.to(roomCode).emit('allAnswered', room);
-  }, 30000); // 30 seconds
+  }, (Number(room.questionTime || 30)) * 1000);
 
   questionTimers.set(roomCode, timer);
 }
@@ -405,35 +406,200 @@ function startQuestionTimer(roomCode, room) {
 function clearQuestionTimer(roomCode) {
   const timer = questionTimers.get(roomCode);
   if (timer) {
-    clearTimeout(timer);
-    questionTimers.delete(roomCode);
+    cDomol}haloss.env.NODE_ENV === 'production'
+  s'pk/utca'(rpMon .ru
   }
+  // Appy JSON par{  return express.json()(req, res, next);
+    // Update settings (only admin, only while waiting)
+so    const roomCode = Array.from(sock    const room = rooms.get(roomCode);
+      if (!room || room.adminId !== socket.id || room.status !== 'waiting') return;
+  
+      const { topic, difficulty, questionCount, questionTime } = data || {};
+c    if (typeof difficulty === 'string') room.difficulty = difficulty;
+      if (typeof questionCount === 'number') {
+        room.questionCount = Math.max(1, Math.min(20, questionCount));
+        room.totalQuestions = room.questionCount;
+      }
+      if (typeofroom.nme =Id === socket.id== 'number') {
+        const allowed = [10, 15, 20, 25, 30];
+        room.questionTime = allowed.includes(questionTime) ? questionTime : 30;
+      }
+  
+      // Settings changed -> questions need regeneration
+      room.questions = [];
+     ;rur;
 }
 
-// Middleware
-const allowedOrigins = process.env.NODE_ENV === 'production'
-  ? ['https://quizz-coral-five.vercel.app']
-  : ['http://localhost:3000', 'http://localhost:3001'];
+    ///Fallback:/s aerate sog)hulobeera.neteQuestions', async () => {
+   cforo(nst ro[oc, om(s]oo(!oom s|| room.adminId !== socket.id || room.status !== 'waiting') return;
 
-const corsOptions = {
-  origin: allowedOrigins,
-  credentials: true,
-  methods: ['GET', 'POST', 'OPTIONS'],
-};
+  try {
+    io.to(roomCode).emit('generatingQuestions', { roomCode });
+    const questions = await generateQuestions(room.topic, room.difficulty, room.questionCount);
+    room.questions = quec
+    room.questionsReady = truec
+    io.to(roomCode).emit('questionsGenerated', room);
+    io.to(roomCode).emit('roomUpdated', room);
+  } catch (e) {
+    socket.emit('error', { message: 'Failed to generate questions' });
+  }c
+});
+break;
+  // Play again (reset same room back to lobby)
+  so}
+ck})'playAgain', () => {
+c);onst roomCode = Array.from(socket.rooms)[1];
+    const room = rooms.get(roomCode);
+if Timer m!nmgement
+uonst;questinTier=nwMp(;
 
-// CORS
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+unti startQueionTime(Cde,
+  clearQuestionTimer(roomCode);
 
-// IMPORTANT: do not run express.json() on Engine.IO (Socket.IO) endpoints,
-// it breaks polling POST bodies and causes 400 Bad Request.
-app.use((req, res, next) => {
-  // Skip JSON parsing for socket transport endpoints
-  if (req.url.startsWith('/socket.io/')) {
-    return next();
-  }
-  // Apply JSON parser for our normal API routes
-  return express.json()(req, res, next);
+room.stattmer = s;tTmout() {
+ io.to(romCod)emt('timeUp', room
+
+    //rAuto-submot.unanswerereplayersn = 0;
+    .questions = forEach(];ayr=> {
+    ro.que!sReady=aaswered
+playeanswrd = ue
+    // Rptpyer.relecsedAoswes = -1; // Noranswer
+oompr }.forEach(p => {
+    });
+
+  p.oo.to = 0;Coe).et('allAwre',room);
+  }, (Number(room.questionTime || 30)) *p1000);
+
+.aquestionTimees.set(rredCo e, tifer);
+}
+
+functaol;caQuetonTimer(roomCoe) {ectedAnswer = null;
+  const timer = questswnTimems=g llCo
+  if (timer) {oundPoints = 0;
+    clrTimeout(timer)
+questionTimers.delete(roomCode);
+  clearQuestionTimer(roomCode);
+ o.to(roomCode).emit('roomUpdated', room);
+);
+  // Leave room
+  socket.on('leaveRoom', () => {
+    const roomCode = socketRoomMap.get(socket.id);
+    if (!roomCode) return;
+
+    const room = rooms.get(roomCode);
+    socket.leave(roomCode);
+    socketRoomMap.delete(socket.id);
+
+    if (room) {
+      const idx = room.players.findIndex(p => p.id === socket.id);
+      if (idx !== -1) {
+        const leavingWasAdmin = room.players[idx].id === room.adminId;
+        room.players.splice(idx, 1);
+        if (room.players.length === 0) {
+          rooms.delete(roomCode);
+          clearQuestionTimer(roomCode);
+        } else {
+          if (leavingWasAdmin) {
+            room.adminId = room.players[0].id;
+          }
+          io.to(roomCode).emit('roomUpdated', room);
+        }
+      }son()(req, res, next);
+  // Update settings (only admin, only while waiting)
+  socket.on('updateSettings', (data) => {
+    const roomCode = Array.from(socket.rooms)[1];
+    const room = rooms.get(roomCode);
+    if (!room || room.adminId !== socket.id || room.status !== 'waiting') return;
+
+    const { topic, difficulty, questionCount, questionTime } = data || {};
+    if (typeof topic === 'string') room.topic = topic;
+    if (typeof difficulty === 'string') room.difficulty = difficulty;
+    if (typeof questionCount === 'number') {
+      room.questionCount = Math.max(1, Math.min(20, questionCount));
+      room.totalQuestions = room.questionCount;
+    }
+    if (typeof questionTime === 'number') {
+      const allowed = [10, 15, 20, 25, 30];
+      room.questionTime = allowed.includes(questionTime) ? questionTime : 30;
+    }
+
+    // Settings changed -> questions need regeneration
+    room.questions = [];
+    room.questionsReady = false;
+    io.to(roomCode).emit('roomUpdated', room);
+  });
+
+  // Generate questions (admin, waiting)
+  socket.on('generateQuestions', async () => {
+    const roomCode = Array.from(socket.rooms)[1];
+    const room = rooms.get(roomCode);
+    if (!room || room.adminId !== socket.id || room.status !== 'waiting') return;
+
+    try {
+      io.to(roomCode).emit('generatingQuestions', { roomCode });
+      cont questis = await generateQuestionsroom.topic, room.difficulty, room.questionCount;
+      room.questions = questions;
+      room.questionsReady = true;
+      io.tooomCode).mit('uestionsGenerated', room);
+      io.to(roomCode).emit('roomUpdated'oom);
+    } catch () {
+      ocket.emit('error' { message: 'Failed to generate questions' });
+    }
+  });
+
+  //Play agai (rest same room back to lobby)
+  socket.on('playAgain', () => {
+    const roomCode = Array.from(socket.rooms)[1];
+    const room = rooms.get(roomCode);
+    if (!room) return;
+
+    room.status = 'waiting';
+    room.currentQuestion = 0;
+    room.questions = [];
+    room.questionsReady = false;
+
+    // Reset players to fresh state (scores reset for a new match)
+    room.players.forEach(p => {
+      p.score = 0;
+      p.answered = false;
+      p.selectedAnswer = null;
+      p.answerTime = null;
+      p.roundPoints = 0;
+    });
+
+    clearQuestionTimer(roomCode);
+    io.to(roomCode).emit('roomUpdated', room);
+  });
+
+  // Leave room
+  socket.on('leaveRoom', () => {
+    const roomCode = socketRoomMap.get(socket.id);
+    if (!roomCode) return;
+
+    const room = rooms.get(roomCode);
+    socket.leave(roomCode);
+    socketRoomMap.delete(socket.id);
+
+    if (room) {
+      const idx = room.players.findIndex(p => p.id === socket.id);
+      if (idx !== -1) {
+        const leavingWasAdmin = room.players[id].id === room.adminId;
+        room.players.splice(idx, 1);
+        if (room.players.length === 0) {
+          rooms.delee(roomCode
+          clearQuestionTimer(roomCode);
+          else {
+          if (leavingWasAdmin  {
+            room.adminId = room.players[0].id  }
+          }  });
+          io.to(roomCode).emit('roomUpdated', room);
+        }
+      }
+    }
+  });
+});
+
+// Health check
 });
 
 // Health check
@@ -456,7 +622,7 @@ app.get('/api/health/cors', (req, res) => {
   });
 });
 
-// Export app (for tests or other runtimes)
+// Export apper (only wh n (un directly, not in Vercel)for tests or other runtimes)
 export default app;
 
 // Start server (only when run directly, not in Vercel)
@@ -468,9 +634,7 @@ if (!process.env.LAMBDA_TASK_ROOT && !process.env.VERCEL && process.argv[1].ends
   });
 
   // Cleanup timers on server shutdown
-  process.on('SIGINT', () => {
-    console.log('Shutting down server...');
-    for (const timer of questionTimers.values()) {
+  process.on('SIGINT', () onsole.log('Shutting down server...');
       clearTimeout(timer);
     }
     process.exit(0);
