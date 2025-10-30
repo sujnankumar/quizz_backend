@@ -11,9 +11,13 @@ const app = express();
 const server = http.createServer(app);
 const io = new SocketIOServer(server, {
   cors: {
-    origin: "*", // In production, replace with your frontend URL
-    methods: ["GET", "POST"]
-  }
+    origin: process.env.NODE_ENV === 'production'
+      ? ["https://quizz-coral-five.vercel.app"]
+      : ["http://localhost:3000", "http://localhost:3001"],
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ['polling', 'websocket']
 });
 
 const PORT = process.env.PORT || 3001;
@@ -349,16 +353,21 @@ app.get('/', (req, res) => {
   res.json({ status: 'Quiz Game Backend Running', rooms: rooms.size });
 });
 
-// Start server
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Export for Vercel serverless functions
+export default app;
 
-// Cleanup timers on server shutdown
-process.on('SIGINT', () => {
-  console.log('Shutting down server...');
-  for (const timer of questionTimers.values()) {
-    clearTimeout(timer);
-  }
-  process.exit(0);
-});
+// Start server (only when run directly, not in Vercel)
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+
+  // Cleanup timers on server shutdown
+  process.on('SIGINT', () => {
+    console.log('Shutting down server...');
+    for (const timer of questionTimers.values()) {
+      clearTimeout(timer);
+    }
+    process.exit(0);
+  });
+}
