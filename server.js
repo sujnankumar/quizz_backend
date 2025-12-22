@@ -70,7 +70,7 @@ io.use((socket, next) => {
 // Question generation function using Gemini
 async function generateQuestions(topic, difficulty, count) {
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
 
     const schema = {
       type: 'ARRAY',
