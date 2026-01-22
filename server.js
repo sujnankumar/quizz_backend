@@ -97,8 +97,25 @@ async function generateQuestions(topic, difficulty, count) {
     });
 
     const response = await result.response;
-    const jsonText = response.text();
-    const questions = JSON.parse(jsonText);
+
+    let jsonText = response.text();
+    console.log('Gemini Raw Response:', jsonText);
+
+    if (!jsonText) {
+      throw new Error('Empty response from AI');
+    }
+
+    // Strip markdown code fences if present
+    jsonText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
+
+    let questions;
+    try {
+      questions = JSON.parse(jsonText);
+    } catch (parseError) {
+      console.error('JSON Parse Error:', parseError);
+      console.error('Failed JSON:', jsonText);
+      throw new Error('Invalid JSON format from AI');
+    }
 
     return questions.map((q, index) => ({
       id: q.id || `q_${Date.now()}_${index}`,
